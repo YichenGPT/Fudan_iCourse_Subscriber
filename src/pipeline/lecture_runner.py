@@ -296,58 +296,97 @@ class LectureRunner:
         # Pull the audio handle.  ``schedule`` is idempotent — usually the
         # previous lecture already kicked it off (Phase C), but for the
         # first lecture in the batch we still need to fire it ourselves.
+        #
+        # A WebVPN/iCourse stream can sometimes end *cleanly* after only a
+        # small prefix.  ffmpeg returns 0 in that case, which means its own
+        # reconnect flags never fire.  The transcriber detects this by
+        # comparing decoded and advertised durations.  Retry here so every
+        # attempt resolves a fresh signed URL and starts a fresh ffmpeg
+        # process; otherwise a transient 67-second cut in a two-hour lecture
+        # is not retried until the next scheduled workflow run.
         downloader = self._scheduler.audio_downloader
-        downloader.schedule(self._client, course_id, sub_id)
-        try:
-            handle = downloader.get(sub_id, timeout=120)
-        except TimeoutError as e:
-            self._reporter.info(f"    [SKIP] {e}")
-            self._db.update_error(sub_id, "transcribe", str(e))
-            return None, None
-        if handle is None:
-            # AudioDownloader returns None when get_video_url() returned
-            # None — i.e. the lecture has no playable video.  Record an
-            # error so the lecture is retried (the video may appear later)
-            # but abandoned after max_errors instead of every day forever.
-            # The "no_video" stage is a contract with the frontend, which
-            # renders it as a gray "无视频" hint instead of a red failure.
-            self._reporter.lecture_skip_no_video(
-                existing.get("sub_title", sub_id) if existing else sub_id
-            )
-            self._db.update_error(sub_id, "no_video", "no playable video URL")
-            return None, None
+        max_attempts = config.AUDIO_DOWNLOAD_ATTEMPTS
+        for attempt in range(1, max_attempts + 1):
+            downloader.schedule(self._client, course_id, sub_id)
+            try:
+                handle = downloader.get(sub_id, timeout=120)
+            except TimeoutError as e:
+                # Remove a pending spawn before retrying so a late thread
+                # cannot resurrect an orphan process and consume a slot.
+                self._release_audio(sub_id)
+                if attempt < max_attempts:
+                    self._reporter.info(
+                        f"    [RETRY {attempt}/{max_attempts}] Audio did not "
+                        f"start: {e}"
+                    )
+                    self._audio_retry_backoff(attempt)
+                    continue
+                self._reporter.info(f"    [SKIP] {e}")
+                self._db.update_error(sub_id, "transcribe", str(e))
+                return None, None
 
-        try:
-            transcript, segments = self._transcriber.transcribe_tail(
-                handle.path, handle.process, handle.stderr_chunks,
-            )
-        except NoAudioStreamError as e:
-            self._reporter.info(f"    [SKIP] Video-only (no audio stream): {e}")
-            self._db.update_error(sub_id, "transcribe", str(e))
-            self._db.mark_processed(sub_id)
-            self._release_audio(sub_id)
-            return None, None
-        except IncompleteAudioError as e:
-            # Truncated download (ffmpeg may even exit 0 on a server-side
-            # cut).  Don't persist the partial transcript — it would
-            # short-circuit the retry — just record the error so the
-            # lecture is retried up to max_errors times.
-            self._reporter.info(
-                f"    [SKIP] Incomplete audio, will retry next run: {e}"
-            )
-            self._db.update_error(sub_id, "transcribe", str(e))
-            self._release_audio(sub_id)
-            return None, None
-        except Exception as e:
-            self._reporter.info(
-                f"    [FAIL] Transcription error: {type(e).__name__}: {e}"
-            )
-            self._db.update_error(sub_id, "transcribe", str(e))
-            self._release_audio(sub_id)
-            raise
+            if handle is None:
+                # AudioDownloader returns None when get_video_url() returned
+                # None — i.e. the lecture has no playable video.  Record an
+                # error so the lecture is retried (the video may appear later)
+                # but abandoned after max_errors instead of every day forever.
+                # The "no_video" stage is a contract with the frontend, which
+                # renders it as a gray "无视频" hint instead of a red failure.
+                self._reporter.lecture_skip_no_video(
+                    existing.get("sub_title", sub_id) if existing else sub_id
+                )
+                self._db.update_error(
+                    sub_id, "no_video", "no playable video URL"
+                )
+                return None, None
+
+            try:
+                transcript, segments = self._transcriber.transcribe_tail(
+                    handle.path, handle.process, handle.stderr_chunks,
+                )
+            except NoAudioStreamError as e:
+                self._reporter.info(
+                    f"    [SKIP] Video-only (no audio stream): {e}"
+                )
+                self._db.update_error(sub_id, "transcribe", str(e))
+                self._db.mark_processed(sub_id)
+                self._release_audio(sub_id)
+                return None, None
+            except IncompleteAudioError as e:
+                # Never persist the partial transcript: doing so would make
+                # the next attempt short-circuit as if it were complete.
+                self._release_audio(sub_id)
+                if attempt < max_attempts:
+                    self._reporter.info(
+                        f"    [RETRY {attempt}/{max_attempts}] Incomplete "
+                        f"audio; fetching a fresh signed URL: {e}"
+                    )
+                    self._audio_retry_backoff(attempt)
+                    continue
+                self._reporter.info(
+                    f"    [SKIP] Incomplete audio after {max_attempts} "
+                    f"attempts; will retry next run: {e}"
+                )
+                self._db.update_error(sub_id, "transcribe", str(e))
+                return None, None
+            except Exception as e:
+                self._reporter.info(
+                    f"    [FAIL] Transcription error: {type(e).__name__}: {e}"
+                )
+                self._db.update_error(sub_id, "transcribe", str(e))
+                self._release_audio(sub_id)
+                raise
+            break
 
         self._db.update_transcript(sub_id, transcript)
         return transcript, segments
+
+    @staticmethod
+    def _audio_retry_backoff(attempt: int) -> None:
+        """Short linear backoff before resolving a fresh stream URL."""
+        delay = config.AUDIO_RETRY_BACKOFF_SECONDS * attempt
+        if delay > 0:
+            time.sleep(delay)
 
     def _summarize(self, sub_id: str, course_title: str, transcript: str,
                    transcript_segments: list[dict] | None) -> Optional[str]:
@@ -383,5 +422,4 @@ class LectureRunner:
             self._reporter.info(
                 f"    [WARN] audio release failed: {type(e).__name__}: {e}"
             )
-
 

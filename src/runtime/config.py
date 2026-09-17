@@ -163,6 +163,17 @@ OCR_MAX_TARGET = int(os.environ.get("OCR_MAX_TARGET", "2"))
 VIDEO_DOWNLOAD_CONCURRENCY = int(
     os.environ.get("VIDEO_DOWNLOAD_CONCURRENCY", "2")
 )
+# A signed iCourse stream occasionally closes cleanly after only a few
+# seconds.  ffmpeg then exits with code 0, so its built-in reconnect options
+# cannot distinguish the premature EOF from the real end of the recording.
+# Retry the whole pull with a newly resolved video URL in the same workflow
+# instead of waiting for the next day's scheduled run.
+AUDIO_DOWNLOAD_ATTEMPTS = max(
+    1, int(os.environ.get("AUDIO_DOWNLOAD_ATTEMPTS", "3"))
+)
+AUDIO_RETRY_BACKOFF_SECONDS = max(
+    0.0, float(os.environ.get("AUDIO_RETRY_BACKOFF_SECONDS", "5"))
+)
 
 # 是否优先使用 iCourse 官方字幕（跳过 ASR 转录）。默认关闭。
 USE_OFFICIAL_TRANSCRIPT = (
