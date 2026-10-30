@@ -1,78 +1,49 @@
-/**
- * Markdown + KaTeX rendering pipeline.
- * Sets window.ICS.render global.
- *
- * Depends on CDN globals: marked, DOMPurify, renderMathInElement
- *
- * Pipeline: stash formulas → marked → restore formulas → DOMPurify → KaTeX
- * We stash formula delimiters before marked.parse() because characters like
- * * and _ inside $...$ LaTeX (e.g. D^*, P_n, \sum_{i=1}) would otherwise
- * be treated as markdown emphasis and break the formula structure.
- */
-
+/** Markdown + KaTeX rendering; protect code before recognizing math. */
 window.ICS = window.ICS || {};
-
 var _FORMULA_PLACEHOLDER_PREFIX = "";
 var _FORMULA_PLACEHOLDER_SUFFIX = "";
-
-/** Replace $...$ and $$...$$ with placeholders so marked won't touch them. */
 function _stashFormulas(mdText) {
   var formulas = [];
-  function stash(replacement) {
+  function stash(value) {
     var key = _FORMULA_PLACEHOLDER_PREFIX + formulas.length + _FORMULA_PLACEHOLDER_SUFFIX;
-    formulas.push(replacement);
+    formulas.push(value);
     return key;
   }
-
-  var text = mdText;
-
-  // 1. Stash existing \(...\) and \[...\] (already-LaTeX, protect from double-processing)
-  text = text.replace(/(\\\([\s\S]*?\\\))|(\\\[[\s\S]*?\\\])/g, function (m) {
-    return stash(m);
-  });
-
-  // 2. Stash $$...$$ (must run before $ → to avoid consuming individual $ chars of $$)
-  text = text.replace(/\$\$([\s\S]*?)\$\$/g, function (_, f) {
-    return stash("\\[" + f + "\\]");
-  });
-
-  // 3. Stash $...$ (inline math — non-greedy to pair nearest closing $)
-  text = text.replace(/\$([\s\S]+?)\$/g, function (_, f) {
-    return stash("\\(" + f + "\\)");
-  });
-
+  var text = mdText.replace(
+    /(^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\2[ \t]*(?=\n|$))|(`+)([^\n]*?)\3|(\\\[[\s\S]*?\\\])|(\\\([^\n]*?\\\))|\$\$([\s\S]*?)\$\$|(?<![\\$])\$(?!\$)([^\n$]+?)\$(?!\$)/gm,
+    function (match, fence, marker, ticks, code, display, inline, dollars, single) {
+      if (fence || ticks) return match;
+      if (display || inline) return stash(match);
+      return stash(dollars !== undefined ? "\\[" + dollars + "\\]" : "\\(" + single + "\\)");
+    }
+  );
   return { text: text, formulas: formulas };
 }
-
-/** Restore stashed formulas in the HTML output after marked.parse(). */
 function _restoreFormulas(html, formulas) {
   for (var i = 0; i < formulas.length; i++) {
-    html = html.split(_FORMULA_PLACEHOLDER_PREFIX + i + _FORMULA_PLACEHOLDER_SUFFIX).join(formulas[i]);
+    // Math is text: preserve comparisons through HTML parsing and sanitization.
+    var escaped = formulas[i].replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    html = html.split(_FORMULA_PLACEHOLDER_PREFIX + i + _FORMULA_PLACEHOLDER_SUFFIX).join(escaped);
   }
   return html;
 }
-
 function _renderMarkdown(mdText) {
   if (!mdText) return "";
   var stashed = _stashFormulas(mdText);
   var rawHtml = marked.parse(stashed.text, { breaks: true });
-  var restored = _restoreFormulas(rawHtml, stashed.formulas);
-  return DOMPurify.sanitize(restored);
+  return DOMPurify.sanitize(_restoreFormulas(rawHtml, stashed.formulas));
 }
-
 function _activateKaTeX(element) {
   if (typeof renderMathInElement !== "function") return;
   renderMathInElement(element, {
     delimiters: [
       { left: "$$", right: "$$", display: true },
       { left: "\\[", right: "\\]", display: true },
-      { left: "\\(", right: "\\)", display: false },
-      // NOTE: $...$ intentionally omitted from KaTeX — converted to \(...\) in _stashFormulas
+      { left: "\\(", right: "\\)", display: false }
     ],
-    throwOnError: false,
+    throwOnError: false
   });
 }
-
 function _plainSnippet(mdText, maxLen) {
   maxLen = maxLen || 100;
   if (!mdText) return "";
@@ -91,9 +62,8 @@ function _plainSnippet(mdText, maxLen) {
     .trim();
   return text.length > maxLen ? text.slice(0, maxLen) + "..." : text;
 }
-
 window.ICS.render = {
   renderMarkdown: _renderMarkdown,
   activateKaTeX: _activateKaTeX,
-  plainSnippet: _plainSnippet,
+  plainSnippet: _plainSnippet
 };
