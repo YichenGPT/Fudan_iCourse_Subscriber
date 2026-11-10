@@ -315,7 +315,7 @@ class WebVPNSession:
 
         login_token = data.get("loginToken", "") or (data.get("data", {}).get("loginToken", "") if isinstance(data.get("data"), dict) else "")
         if not login_token:
-            raise RuntimeError(f"No loginToken in iCourse CAS response; second={data.get('second')}; page={data.get('pageLevelNo')}; modules={data.get('moduleCodes')}; schema={ {str(k): type(v).__name__ for k,v in data.items()} }; data_schema={list(data["data"]) if isinstance(data.get("data"), dict) else type(data.get("data")).__name__}")
+            raise (PermissionError if data.get("second") is True else RuntimeError)(f"iCourse authentication incomplete (second=True requires interactive school verification); second={data.get('second')}; page={data.get('pageLevelNo')}; modules={data.get('moduleCodes')}; schema={ {str(k): type(v).__name__ for k,v in data.items()} }; data_schema={list(data["data"]) if isinstance(data.get("data"), dict) else type(data.get("data")).__name__}")
         print("    loginToken: OK")
 
         # Step 6: Get CAS ticket (through WebVPN)
