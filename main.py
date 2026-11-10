@@ -47,7 +47,7 @@ def login_with_retry(max_attempts: int = 10) -> WebVPNSession:
             vpn.authenticate_icourse()
             return vpn
         except Exception as e:
-            if attempt < max_attempts - 1:
+            if attempt < max_attempts - 1 and not isinstance(e, PermissionError):
                 print(f"  Failed: {type(e).__name__}: {e}; retrying...")
                 time.sleep(5)
             else:
