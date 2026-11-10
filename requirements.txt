@@ -9,3 +9,5 @@ psutil
 pygments
 rapidocr-onnxruntime
 imagehash
+
+qrcode[pil]
