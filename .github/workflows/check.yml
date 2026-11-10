@@ -164,6 +164,8 @@ jobs:
       - name: Run
         timeout-minutes: 350
         env:
+          ICS_CLOUD_QR: '1'
+          GITHUB_TOKEN: ${{ github.token }}
           StuId: ${{ secrets.STUID }}
           UISPsw: ${{ secrets.UISPSW }}
           COURSE_IDS: ${{ secrets.COURSE_IDS }}
