@@ -189,8 +189,8 @@ class WebVPNSession:
         warmup = self.session.get(
             config.WEBVPN_BASE + "/", allow_redirects=False, timeout=5,
         )
-        if warmup.status_code != 200:
-            raise RuntimeError("WebVPN session cold — re-login needed")
+        if warmup.status_code >= 400:
+            warmup.raise_for_status()
 
         idp_vpn_base = get_vpn_url(config.IDP_BASE)
 
@@ -206,6 +206,16 @@ class WebVPNSession:
         vpn_url = get_vpn_url(casapi_url)
 
         resp = self.session.get(vpn_url, allow_redirects=True, timeout=60)
+        # An existing SSO session may already have completed the redirect.
+        probe = self.session.get(get_vpn_url(f"{config.ICOURSE_BASE}/userapi/v1/infosimple"), timeout=30)
+        try:
+            user = probe.json()
+        except ValueError:
+            user = {}
+        if (probe.status_code == 200 and user.get("code") in (0, 200)
+                and (user.get("params") or user.get("data"))):
+            print("    Verified: iCourse SSO already authenticated")
+            return True
         lck = None
         for source in [resp.url] + [
             h.headers.get("Location", "") for h in (resp.history or [])
@@ -303,9 +313,9 @@ class WebVPNSession:
                 f"iCourse CAS auth failed (code={data.get('code')})"
             )
 
-        login_token = data.get("loginToken", "")
+        login_token = data.get("loginToken", "") or (data.get("data", {}).get("loginToken", "") if isinstance(data.get("data"), dict) else "")
         if not login_token:
-            raise RuntimeError("No loginToken in iCourse CAS response")
+            raise RuntimeError(f"No loginToken in iCourse CAS response; schema={ {str(k): type(v).__name__ for k,v in data.items()} }; data_schema={list(data["data"]) if isinstance(data.get("data"), dict) else type(data.get("data")).__name__}")
         print("    loginToken: OK")
 
         # Step 6: Get CAS ticket (through WebVPN)
@@ -364,7 +374,7 @@ class WebVPNSession:
             except Exception:
                 pass
 
-        print("    Could not verify iCourse auth via API, proceeding...")
+        raise RuntimeError("iCourse CAS completed but authenticated API verification failed")
         return True
 
     def get(self, url: str, **kwargs) -> requests.Response:
@@ -528,7 +538,7 @@ class WebVPNSession:
             )
 
         # loginToken is at top level, not nested under "data"
-        login_token = data.get("loginToken", "")
+        login_token = data.get("loginToken", "") or (data.get("data", {}).get("loginToken", "") if isinstance(data.get("data"), dict) else "")
         if not login_token:
             raise RuntimeError("No loginToken in response")
 
