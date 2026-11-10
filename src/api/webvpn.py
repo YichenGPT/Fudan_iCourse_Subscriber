@@ -8,6 +8,7 @@ Handles:
 
 import html as html_mod
 import re
+import os
 from binascii import hexlify, unhexlify
 from urllib.parse import urlparse, urlencode, quote, urljoin
 
@@ -314,6 +315,12 @@ class WebVPNSession:
             )
 
         login_token = data.get("loginToken", "") or (data.get("data", {}).get("loginToken", "") if isinstance(data.get("data"), dict) else "")
+        if not login_token and data.get("second") is True and os.environ.get("ICS_CLOUD_QR") == "1":
+            from src.api.cloud_qr import authenticate
+            login_token = authenticate(self, data, payload, {
+                "Content-Type": "application/json", "Referer": f"{idp_vpn_base}/ac/",
+                "Origin": config.WEBVPN_BASE,
+            }, student_id, password)
         if not login_token:
             raise (PermissionError if data.get("second") is True else RuntimeError)(f"iCourse authentication incomplete (second=True requires interactive school verification); second={data.get('second')}; page={data.get('pageLevelNo')}; modules={data.get('moduleCodes')}; schema={ {str(k): type(v).__name__ for k,v in data.items()} }; data_schema={list(data["data"]) if isinstance(data.get("data"), dict) else type(data.get("data")).__name__}")
         print("    loginToken: OK")
