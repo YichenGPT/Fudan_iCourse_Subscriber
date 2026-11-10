@@ -315,7 +315,7 @@ class WebVPNSession:
 
         login_token = data.get("loginToken", "") or (data.get("data", {}).get("loginToken", "") if isinstance(data.get("data"), dict) else "")
         if not login_token:
-            raise RuntimeError(f"No loginToken in iCourse CAS response; schema={ {str(k): type(v).__name__ for k,v in data.items()} }; data_schema={list(data["data"]) if isinstance(data.get("data"), dict) else type(data.get("data")).__name__}")
+            raise RuntimeError(f"No loginToken in iCourse CAS response; second={data.get('second')}; page={data.get('pageLevelNo')}; modules={data.get('moduleCodes')}; schema={ {str(k): type(v).__name__ for k,v in data.items()} }; data_schema={list(data["data"]) if isinstance(data.get("data"), dict) else type(data.get("data")).__name__}")
         print("    loginToken: OK")
 
         # Step 6: Get CAS ticket (through WebVPN)
@@ -364,7 +364,7 @@ class WebVPNSession:
             f"{config.ICOURSE_BASE}/userapi/v1/infosimple"
         )
         resp = self.session.get(test_url, timeout=60)
-        if resp.status_code == 200:
+        if resp.status_code == 200 and urlparse(resp.url).path.rstrip("/") != "/login":
             try:
                 user_data = resp.json()
                 if user_data.get("code") in (0, 200):
@@ -587,9 +587,9 @@ class WebVPNSession:
         for attempt in range(3):
             try:
                 resp = self.session.get(
-                    ticket_url, allow_redirects=True, timeout=20
+                    ticket_url, allow_redirects=True, timeout=90
                 )
-                if resp.status_code == 200:
+                if resp.status_code == 200 and urlparse(resp.url).path.rstrip("/") != "/login":
                     print("    Session established.")
                     return
                 raise RuntimeError(
