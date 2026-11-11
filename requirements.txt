@@ -9,5 +9,5 @@ psutil
 pygments
 rapidocr-onnxruntime
 imagehash
-
 qrcode[pil]
+playwright>=1.51,<2
