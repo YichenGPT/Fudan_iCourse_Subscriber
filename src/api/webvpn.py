@@ -135,6 +135,10 @@ class WebVPNSession:
                 "Set STUID and UISPsw environment variables."
             )
 
+        if os.environ.get("ICS_CLOUD_QR") == "1":
+            from src.api.cloud_qr import authenticate_browser
+            return authenticate_browser(self, student_id, password)
+
         print("[1/7] Getting authentication context...")
         lck, entity_id = self._get_auth_context()
 
