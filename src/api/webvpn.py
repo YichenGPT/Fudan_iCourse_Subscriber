@@ -264,65 +264,78 @@ class WebVPNSession:
             raise RuntimeError("No authChainCode found in response")
         print("    authChainCode: OK")
 
-        # Step 3: Get RSA public key (through WebVPN)
-        print("[3/7] Getting RSA public key (via WebVPN)...")
-        url = get_vpn_url(f"{config.IDP_BASE}/idp/authn/getJsPublicKey")
-        resp = self.session.get(
-            url,
-            headers={"Referer": f"{idp_vpn_base}/ac/"},
-            timeout=60,
-        )
-        data = resp.json()
-        pub_key_b64 = data.get("data", "")
-        if not pub_key_b64:
-            raise RuntimeError("Failed to get public key via WebVPN")
-        print("    Got RSA public key")
-
-        # Step 4: Encrypt password
-        print("[4/7] Encrypting password...")
-        encrypted_password = self._encrypt_password(password, pub_key_b64)
-
-        # Step 5: Execute authentication (through WebVPN)
-        print("[5/7] Executing authentication (via WebVPN)...")
-        url = get_vpn_url(f"{config.IDP_BASE}/idp/authn/authExecute")
-        payload = {
-            "authModuleCode": "userAndPwd",
-            "authChainCode": auth_chain_code,
-            "entityId": entity_id,
-            "requestType": request_type,
-            "lck": lck,
-            "authPara": {
-                "loginName": student_id,
-                "password": encrypted_password,
-                "verifyCode": "",
-            },
-        }
-        resp = self.session.post(
-            url,
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Referer": f"{idp_vpn_base}/ac/",
-                "Origin": config.WEBVPN_BASE,
-            },
-            timeout=60,
-        )
-        data = resp.json()
-
-        if str(data.get("code")) != "200":
-            raise RuntimeError(
-                f"iCourse CAS auth failed (code={data.get('code')})"
-            )
-
-        login_token = data.get("loginToken", "") or (data.get("data", {}).get("loginToken", "") if isinstance(data.get("data"), dict) else "")
-        if not login_token and data.get("second") is True and os.environ.get("ICS_CLOUD_QR") == "1":
+        primary_qr = next((method for method in auth_method_list
+                           if method.get("moduleCode") == "qr"), None)
+        if primary_qr and os.environ.get("ICS_CLOUD_QR") == "1":
             from src.api.cloud_qr import authenticate
-            login_token = authenticate(self, data, payload, {
+            print("[学校扫码登录] 使用学校提供的原生扫码认证。", flush=True)
+            original = {"entityId": entity_id, "requestType": request_type, "lck": lck}
+            login_token = authenticate(self, {
+                "moduleCodes": ["qr"], "authChainCode": primary_qr["authChainCode"],
+            }, original, {
                 "Content-Type": "application/json", "Referer": f"{idp_vpn_base}/ac/",
                 "Origin": config.WEBVPN_BASE,
             }, student_id, password)
-        if not login_token:
-            raise (PermissionError if data.get("second") is True else RuntimeError)(f"iCourse authentication incomplete (second=True requires interactive school verification); second={data.get('second')}; page={data.get('pageLevelNo')}; modules={data.get('moduleCodes')}; schema={ {str(k): type(v).__name__ for k,v in data.items()} }; data_schema={list(data["data"]) if isinstance(data.get("data"), dict) else type(data.get("data")).__name__}")
+        else:
+            # Step 3: Get RSA public key (through WebVPN)
+            print("[3/7] Getting RSA public key (via WebVPN)...")
+            url = get_vpn_url(f"{config.IDP_BASE}/idp/authn/getJsPublicKey")
+            resp = self.session.get(
+                url,
+                headers={"Referer": f"{idp_vpn_base}/ac/"},
+                timeout=60,
+            )
+            data = resp.json()
+            pub_key_b64 = data.get("data", "")
+            if not pub_key_b64:
+                raise RuntimeError("Failed to get public key via WebVPN")
+            print("    Got RSA public key")
+
+            # Step 4: Encrypt password
+            print("[4/7] Encrypting password...")
+            encrypted_password = self._encrypt_password(password, pub_key_b64)
+
+            # Step 5: Execute authentication (through WebVPN)
+            print("[5/7] Executing authentication (via WebVPN)...")
+            url = get_vpn_url(f"{config.IDP_BASE}/idp/authn/authExecute")
+            payload = {
+                "authModuleCode": "userAndPwd",
+                "authChainCode": auth_chain_code,
+                "entityId": entity_id,
+                "requestType": request_type,
+                "lck": lck,
+                "authPara": {
+                    "loginName": student_id,
+                    "password": encrypted_password,
+                    "verifyCode": "",
+                },
+            }
+            resp = self.session.post(
+                url,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Referer": f"{idp_vpn_base}/ac/",
+                    "Origin": config.WEBVPN_BASE,
+                },
+                timeout=60,
+            )
+            data = resp.json()
+
+            if str(data.get("code")) != "200":
+                raise RuntimeError(
+                    f"iCourse CAS auth failed (code={data.get('code')})"
+                )
+
+            login_token = data.get("loginToken", "") or (data.get("data", {}).get("loginToken", "") if isinstance(data.get("data"), dict) else "")
+            if not login_token and data.get("second") is True and os.environ.get("ICS_CLOUD_QR") == "1":
+                from src.api.cloud_qr import authenticate
+                login_token = authenticate(self, data, payload, {
+                    "Content-Type": "application/json", "Referer": f"{idp_vpn_base}/ac/",
+                    "Origin": config.WEBVPN_BASE,
+                }, student_id, password)
+            if not login_token:
+                raise (PermissionError if data.get("second") is True else RuntimeError)(f"iCourse authentication incomplete (second=True requires interactive school verification); second={data.get('second')}; page={data.get('pageLevelNo')}; modules={data.get('moduleCodes')}; schema={ {str(k): type(v).__name__ for k,v in data.items()} }; data_schema={list(data["data"]) if isinstance(data.get("data"), dict) else type(data.get("data")).__name__}")
         print("    loginToken: OK")
 
         # Step 6: Get CAS ticket (through WebVPN)
