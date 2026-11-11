@@ -110,15 +110,17 @@ def authenticate(vpn, challenge, original, headers, student, password):
             while time.monotonic() < refresh:
                 try:
                     result = vpn.session.post(get_vpn_url(config.IDP_BASE + "/idp/authn/authExecute"),
-                        json=poll, headers=headers, timeout=20)
+                        json=poll, headers=headers, timeout=(30, 300))
                     result.raise_for_status()
                     data = result.json()
+                    print(f"[扫码确认返回] code={data.get('code')}; second={data.get('second')}; token_present={bool(data.get('loginToken'))}", flush=True)
                     if str(data.get("code")) == "200" and data.get("loginToken") and not data.get("second"):
                         outcome = "verified"
                         print("[扫码验证] 学校已确认，继续同一次运行。", flush=True)
                         return data["loginToken"]
                 except requests.Timeout:
-                    pass
+                    print("[扫码确认] 学校长连接等待超时，重新获取二维码。", flush=True)
+                    break
                 time.sleep(3)
         raise PermissionError("扫码等待已满15分钟；请重新运行")
     finally:
