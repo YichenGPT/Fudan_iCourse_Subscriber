@@ -10,11 +10,30 @@ import json
 import os
 import time
 
-import qrcode
+from PIL import Image
 import requests
 from Crypto.Cipher import AES
 from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Hash import SHA256
+
+
+def school_qr_png(value):
+    """qrMsg is an image source in the school's UI, not QR payload text."""
+    if not isinstance(value, str) or not value.startswith("data:image/"):
+        raise PermissionError("学校返回了不支持的二维码图片格式，请检查扫码接口")
+    header, encoded = value.split(",", 1)
+    if ";base64" not in header or len(encoded) > 4_000_000:
+        raise PermissionError("二维码图片格式或大小不正确")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        with Image.open(io.BytesIO(raw)) as image:
+            if image.width * image.height > 4_000_000:
+                raise ValueError("image too large")
+            output = io.BytesIO()
+            image.convert("RGB").save(output, format="PNG")
+            return output.getvalue()
+    except (ValueError, OSError) as exc:
+        raise PermissionError("学校二维码图片无法解码") from exc
 
 
 def seal(payload, student, password, run):
@@ -80,10 +99,9 @@ def authenticate(vpn, challenge, original, headers, student, password):
             if str(qr.get("code")) != "200":
                 raise PermissionError("学校未能生成二次认证二维码；请重新运行")
             info = qr["data"]
-            image = qrcode.make(info["qrMsg"])
-            buf = io.BytesIO(); image.save(buf, format="PNG")
+            png = school_qr_png(info["qrMsg"])
             box.publish({"state": "waiting", "expires": int(time.time()) + 90,
-                         "png": base64.b64encode(buf.getvalue()).decode()}, student, password)
+                         "png": base64.b64encode(png).decode()}, student, password)
             poll = {k: original[k] for k in ("entityId", "requestType", "lck")}
             poll.update(authModuleCode="qr", authChainCode=challenge["authChainCode"],
                         requestNumber=challenge["requestNumber"],
