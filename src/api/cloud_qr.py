@@ -9,6 +9,7 @@ import io
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from PIL import Image
 import requests
@@ -90,38 +91,63 @@ def authenticate(vpn, challenge, original, headers, student, password):
             stream.write(f"\n## 等待学校扫码验证\n[打开扫码入口]({link})\n\n最多等待15分钟；用课程页面的学号和密码在浏览器本地解密二维码。\n")
     deadline = time.monotonic() + 900
     outcome = "expired"
+    public = requests.Session()
+    public.headers.update({"Referer": config.IDP_BASE + "/ac/", "Origin": config.IDP_BASE})
+    direct = False
     try:
         while time.monotonic() < deadline:
-            response = vpn.session.post(get_vpn_url(config.IDP_BASE + "/idp/authn/getAuthQr"),
-                json={"entityId": original["entityId"]}, headers=headers, timeout=30)
+            transport = public if direct else vpn.session
+            endpoint = lambda path: config.IDP_BASE + "/idp/authn/" + path if direct else get_vpn_url(config.IDP_BASE + "/idp/authn/" + path)
+            request_headers = dict(public.headers) if direct else dict(headers)
+            request_headers.update({"Cache-Control": "no-cache", "Pragma": "no-cache"})
+            response = transport.post(endpoint("getAuthQr"),
+                params={"_": time.time_ns()}, json={"entityId": original["entityId"]},
+                headers=request_headers, timeout=30)
             response.raise_for_status()
             qr = response.json()
             if str(qr.get("code")) != "200":
                 raise PermissionError("学校未能生成二次认证二维码；请重新运行")
             info = qr["data"]
             png = school_qr_png(info["qrMsg"])
-            box.publish({"state": "waiting", "expires": int(time.time()) + 90,
-                         "png": base64.b64encode(png).decode()}, student, password)
+            if not isinstance(info.get("qrToken"), str) or not info["qrToken"]:
+                raise PermissionError("学校未返回有效的扫码会话")
             poll = {k: original[k] for k in ("entityId", "requestType", "lck")}
             poll.update(authModuleCode="qr", authChainCode=challenge["authChainCode"],
                         requestNumber=challenge["requestNumber"],
                         authPara={"loginName": challenge["userName"], "qrToken": info["qrToken"]})
-            refresh = min(deadline, time.monotonic() + 85)
-            while time.monotonic() < refresh:
+            # The school's UI starts this long request immediately after QR creation.
+            # Keep it alive while publishing the encrypted image to GitHub.
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(transport.post, endpoint("authExecute"),
+                    json=poll, headers=request_headers, timeout=(30, 300))
+                time.sleep(1)
+                if not future.done():
+                    box.publish({"state": "waiting", "expires": int(time.time()) + 90,
+                                 "png": base64.b64encode(png).decode()}, student, password)
+                    print("[扫码确认] 学校确认连接已建立，请扫描本次任务二维码。", flush=True)
                 try:
-                    result = vpn.session.post(get_vpn_url(config.IDP_BASE + "/idp/authn/authExecute"),
-                        json=poll, headers=headers, timeout=(30, 300))
-                    result.raise_for_status()
-                    data = result.json()
-                    print(f"[扫码确认返回] code={data.get('code')}; second={data.get('second')}; token_present={bool(data.get('loginToken'))}; message={str(data.get('message', ''))[:160].replace(student, '[account]').replace(password, '[redacted]')}", flush=True)
-                    if str(data.get("code")) == "200" and data.get("loginToken") and not data.get("second"):
-                        outcome = "verified"
-                        print("[扫码验证] 学校已确认，继续同一次运行。", flush=True)
-                        return data["loginToken"]
+                    result = future.result()
                 except requests.Timeout:
                     print("[扫码确认] 学校长连接等待超时，重新获取二维码。", flush=True)
-                    break
-                time.sleep(3)
+                    continue
+            result.raise_for_status()
+            data = result.json()
+            code = str(data.get("code"))
+            message = str(data.get("message", ""))[:160].replace(student, "[account]").replace(password, "[redacted]")
+            print(f"[扫码确认返回] route={'public' if direct else 'vpn'}; code={code}; second={data.get('second')}; token_present={bool(data.get('loginToken'))}; message={message}", flush=True)
+            if code == "200" and data.get("loginToken") and not data.get("second"):
+                outcome = "verified"
+                print("[扫码验证] 学校已确认，继续同一次运行。", flush=True)
+                return data["loginToken"]
+            if code == "4005":
+                box.publish({"state": "waiting", "expires": int(time.time()), "png": ""}, student, password)
+                if not direct:
+                    direct = True
+                    print("[扫码确认] VPN 路径返回二维码失效，改用学校官方公网确认接口。", flush=True)
+                else:
+                    time.sleep(5)
+                continue
+            raise PermissionError(f"学校扫码确认未通过 (code={code}): {message}")
         raise PermissionError("扫码等待已满15分钟；请重新运行")
     finally:
         # Never let mailbox cleanup hide the original login failure.
