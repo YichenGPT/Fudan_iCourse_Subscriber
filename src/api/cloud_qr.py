@@ -113,7 +113,7 @@ def authenticate(vpn, challenge, original, headers, student, password):
                         json=poll, headers=headers, timeout=(30, 300))
                     result.raise_for_status()
                     data = result.json()
-                    print(f"[扫码确认返回] code={data.get('code')}; second={data.get('second')}; token_present={bool(data.get('loginToken'))}", flush=True)
+                    print(f"[扫码确认返回] code={data.get('code')}; second={data.get('second')}; token_present={bool(data.get('loginToken'))}; message={str(data.get('message', ''))[:160].replace(student, '[account]').replace(password, '[redacted]')}", flush=True)
                     if str(data.get("code")) == "200" and data.get("loginToken") and not data.get("second"):
                         outcome = "verified"
                         print("[扫码验证] 学校已确认，继续同一次运行。", flush=True)
