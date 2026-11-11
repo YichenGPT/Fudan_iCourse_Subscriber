@@ -101,7 +101,7 @@ def authenticate(vpn, challenge, original, headers, student, password):
             request_headers = dict(public.headers) if direct else dict(headers)
             request_headers.update({"Cache-Control": "no-cache", "Pragma": "no-cache"})
             response = transport.post(endpoint("getAuthQr"),
-                params={"_": time.time_ns()}, json={"entityId": original["entityId"]},
+                params={"_": time.time_ns()}, json={"entityId": original["entityId"], "lck": original["lck"]},
                 headers=request_headers, timeout=30)
             response.raise_for_status()
             qr = response.json()
@@ -113,8 +113,10 @@ def authenticate(vpn, challenge, original, headers, student, password):
                 raise PermissionError("学校未返回有效的扫码会话")
             poll = {k: original[k] for k in ("entityId", "requestType", "lck")}
             poll.update(authModuleCode="qr", authChainCode=challenge["authChainCode"],
-                        requestNumber=challenge["requestNumber"],
-                        authPara={"loginName": challenge["userName"], "qrToken": info["qrToken"]})
+                        authPara={"qrToken": info["qrToken"]})
+            if "requestNumber" in challenge:
+                poll["requestNumber"] = challenge["requestNumber"]
+                poll["authPara"]["loginName"] = challenge["userName"]
             # The school's UI starts this long request immediately after QR creation.
             # Keep it alive while publishing the encrypted image to GitHub.
             with ThreadPoolExecutor(max_workers=1) as pool:
