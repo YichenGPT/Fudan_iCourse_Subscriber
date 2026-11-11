@@ -106,7 +106,9 @@ def authenticate_browser(vpn, student, password):
             page = context.new_page()
             page.on("response", observe)
             try:
-                page.goto(cas, wait_until="domcontentloaded", timeout=60000)
+                auth_start = (config.IDP_BASE + "/idp/authCenter/authenticate?service="
+                              + quote(config.WEBVPN_BASE + "/login?cas_login=true", safe=""))
+                page.goto(auth_start, wait_until="domcontentloaded", timeout=60000)
             except Error:
                 print("[学校网页] 正在等待学校登录页面加载。", flush=True)
             deadline = time.monotonic() + 900
@@ -168,7 +170,11 @@ def authenticate_browser(vpn, student, password):
                     page.goto(cas, wait_until="domcontentloaded", timeout=30000)
                 if now - last_notice > 30:
                     last_notice = now
-                    print(f"[学校网页] 等待验证，剩余 {int(deadline-now)} 秒；阶段={'二维码' if latest['png'] else '加载登录页面'}。", flush=True)
+                    stage = "二维码" if latest["png"] else "加载登录页面"
+                    print(f"[学校网页] 等待验证，剩余 {int(deadline-now)} 秒；阶段={stage}; host={current.hostname}; path={current.path[:90]}。", flush=True)
+                    if not latest["png"]:
+                        box.publish({"state": "waiting", "expires": int(time.time()) + 900,
+                                     "png": "", "note": "云端正在打开学校官方登录页，尚未生成二维码。"}, student, password)
             raise PermissionError("学校网页验证等待已满15分钟；已有课程数据保留")
     finally:
         try:
