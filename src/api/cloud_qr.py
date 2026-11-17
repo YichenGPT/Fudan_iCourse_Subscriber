@@ -127,7 +127,7 @@ def authenticate_browser(vpn, student, password):
                 page.wait_for_timeout(1000)
                 now = time.monotonic()
                 current = urlparse(page.url)
-                if latest.get("may_verify") and now - last_probe > 8:
+                if (latest.get("may_verify") or (current.hostname == proxy_host and not current.path.rstrip("/").endswith("/ac"))) and now - last_probe > 8:
                     last_probe = now
                     import_cookies(context)
                     vpn.session.headers["User-Agent"] = page.evaluate("navigator.userAgent")
@@ -172,10 +172,12 @@ def authenticate_browser(vpn, student, password):
                             password_pages.add(page.url)
                             submit.first.click(timeout=5000)
                             print("[学校网页] 已提交学校登录，等待官方后续认证。", flush=True)
-                if (current.hostname == proxy_host and current.path in ("/", "/portal", "/portal/")
+                if (current.hostname == proxy_host and current.path in ("/", "/portal", "/portal/", "/login")
                         and now - last_route > 20):
                     last_route = now
-                    page.goto(cas, wait_until="domcontentloaded", timeout=30000)
+                    target = config.WEBVPN_BASE + "/login?cas_login=true" if current.path == "/login" else cas
+                    print("[学校网页] 已离开认证页，继续 WebVPN/iCourse 跳转。", flush=True)
+                    page.goto(target, wait_until="domcontentloaded", timeout=30000)
                 if now - last_notice > 30:
                     last_notice = now
                     stage = "二维码" if latest["png"] else "加载登录页面"
