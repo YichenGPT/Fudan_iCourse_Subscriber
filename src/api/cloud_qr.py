@@ -48,151 +48,6 @@ def seal(payload, student, password, run):
             for k, v in dict(salt=salt, nonce=nonce, ciphertext=ciphertext, tag=tag).items()}}
 
 
-def authenticate_browser(vpn, student, password):
-    """Let the official school UI own QR generation, confirmation and redirects.
-
-    Browser state is ephemeral. Only the encrypted QR image leaves the runner;
-    cookies are imported into the existing downloader only after a user API probe.
-    """
-    from playwright.sync_api import sync_playwright, Error
-    from urllib.parse import quote, urlparse
-    from src.api.webvpn import get_vpn_url
-    from src.runtime import config
-
-    box = Mailbox()
-    link = f"https://{box.repo.split('/')[0]}.github.io/{box.repo.split('/')[1]}/auth.html?run={box.run}"
-    print(f"[学校网页验证，最多15分钟] {link}", flush=True)
-    summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary:
-        with open(summary, "a") as stream:
-            stream.write(f"\n## 学校官方网页验证\n[打开本次扫码入口]({link})\n\n确认后自动验证 iCourse 会话并继续处理课程。\n")
-    cas = get_vpn_url(
-        f"{config.ICOURSE_BASE}/casapi/index.php?r=auth/login&school_login=1"
-        f"&tenant_code={config.TENANT_CODE}&forward={quote(config.ICOURSE_BASE + '/', safe='')}"
-    )
-    proxy_host = urlparse(config.WEBVPN_BASE).hostname
-    latest = {"png": None, "invalid": False, "generation": 0}
-    outcome = "expired"
-
-    def observe(response):
-        try:
-            path = urlparse(response.url).path
-            if path.endswith("/authn/getAuthQr"):
-                data = response.json()
-                if str(data.get("code")) == "200":
-                    latest.update(png=school_qr_png(data["data"]["qrMsg"]), invalid=False,
-                                  generation=latest["generation"] + 1, issued_at=int(time.time()), may_verify=False, qr_token=data["data"].get("qrToken"))
-            elif path.endswith("/authn/authExecute"):
-                data = response.json()
-                code = str(data.get("code"))
-                print(f"[学校网页返回] code={code}; second={bool(data.get('second'))}; token_present={bool(data.get('loginToken'))}", flush=True)
-                if data.get("loginToken"):
-                    latest["may_verify"] = True
-                if code == "4005":
-                    try:
-                        sent = response.request.post_data_json or {}
-                        token = sent.get("authPara", {}).get("qrToken")
-                        if token == latest.get("qr_token"):
-                            latest["invalid"] = True
-                    except (ValueError, Error):
-                        pass
-        except (ValueError, KeyError, PermissionError, Error):
-            # Navigation can cancel a response body. The page remains authoritative.
-            pass
-
-    def import_cookies(context):
-        vpn.session.cookies.clear()
-        for cookie in context.cookies():
-            if cookie["domain"].lstrip(".") == proxy_host:
-                vpn.session.cookies.set(cookie["name"], cookie["value"],
-                    domain=cookie["domain"], path=cookie["path"], secure=cookie["secure"])
-
-    try:
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
-            context = browser.new_context(viewport={"width": 1200, "height": 900})
-            page = context.new_page()
-            page.on("response", observe)
-            try:
-                auth_start = (config.IDP_BASE + "/idp/authCenter/authenticate?service="
-                              + quote(config.WEBVPN_BASE + "/login?cas_login=true", safe=""))
-                page.goto(auth_start, wait_until="domcontentloaded", timeout=60000)
-            except Error:
-                print("[学校网页] 正在等待学校登录页面加载。", flush=True)
-            deadline = time.monotonic() + 900
-            published = -1
-            last_probe = last_refresh = last_notice = last_route = 0
-            password_pages = set()
-            while time.monotonic() < deadline:
-                page.wait_for_timeout(1000)
-                now = time.monotonic()
-                current = urlparse(page.url)
-                if (latest.get("may_verify") or (current.hostname == proxy_host and not current.path.rstrip("/").endswith("/ac"))) and now - last_probe > 8:
-                    last_probe = now
-                    import_cookies(context)
-                    vpn.session.headers["User-Agent"] = page.evaluate("navigator.userAgent")
-                    try:
-                        response = vpn.get(config.ICOURSE_BASE + "/userapi/v1/infosimple", timeout=8)
-                        data = response.json()
-                        user_info = data.get("params") or data.get("data") or {}
-                        if (response.status_code == 200 and data.get("code") in (0, 200)
-                                and isinstance(user_info, dict) and user_info.get("id")):
-                            vpn.logged_in = True
-                            outcome = "verified"
-                            print("[学校网页] iCourse 用户接口验证成功，继续抓课和总结。", flush=True)
-                            return True
-                    except (requests.RequestException, ValueError):
-                        pass
-                if latest["png"] and published != latest["generation"] and not latest["invalid"]:
-                    box.publish({"state": "waiting", "issued_at": latest["issued_at"], "expires": latest["issued_at"] + 30,
-                                 "png": base64.b64encode(latest["png"]).decode()}, student, password)
-                    published = latest["generation"]
-                    print("[学校网页] 已同步官方页面二维码，请用微信扫码确认。", flush=True)
-                if latest["invalid"] and now - last_refresh > 5:
-                    last_refresh = now
-                    box.publish({"state": "waiting", "expires": int(time.time()), "png": ""}, student, password)
-                    refresh = page.locator(".qrcode-refresh").filter(visible=True)
-                    if refresh.count():
-                        refresh.first.click(timeout=3000)
-                    else:
-                        candidate = page.get_by_text("刷新", exact=True).filter(visible=True)
-                        if candidate.count():
-                            candidate.first.click(timeout=3000)
-                # Complete the existing password step only on official school origins.
-                if current.hostname in (proxy_host, urlparse(config.IDP_BASE).hostname):
-                    pwd = page.locator('input[type="password"]:visible')
-                    if pwd.count() and page.url not in password_pages and not latest["png"]:
-                        user = page.locator('input[placeholder*="学工号"]:visible, input[placeholder*="用户名"]:visible')
-                        if not user.count():
-                            user = page.locator('input[type="text"]:visible')
-                        submit = page.get_by_text("登录", exact=True).filter(visible=True)
-                        if user.count() and submit.count():
-                            user.first.fill(student)
-                            pwd.first.fill(password)
-                            password_pages.add(page.url)
-                            submit.first.click(timeout=5000)
-                            print("[学校网页] 已提交学校登录，等待官方后续认证。", flush=True)
-                if (current.hostname == proxy_host and current.path in ("/", "/portal", "/portal/", "/login")
-                        and now - last_route > 20):
-                    last_route = now
-                    target = config.WEBVPN_BASE + "/login?cas_login=true" if current.path == "/login" else cas
-                    print("[学校网页] 已离开认证页，继续 WebVPN/iCourse 跳转。", flush=True)
-                    page.goto(target, wait_until="domcontentloaded", timeout=30000)
-                if now - last_notice > 30:
-                    last_notice = now
-                    stage = "二维码" if latest["png"] else "加载登录页面"
-                    print(f"[学校网页] 等待验证，剩余 {int(deadline-now)} 秒；阶段={stage}; host={current.hostname}; path={current.path[:90]}。", flush=True)
-                    if not latest["png"]:
-                        box.publish({"state": "waiting", "expires": int(time.time()) + 900,
-                                     "png": "", "note": "云端正在打开学校官方登录页，尚未生成二维码。"}, student, password)
-            raise PermissionError("学校网页验证等待已满15分钟；已有课程数据保留")
-    finally:
-        try:
-            box.publish({"state": outcome, "expires": int(time.time()), "png": ""}, student, password)
-        except requests.RequestException:
-            pass
-
-
 class Mailbox:
     def __init__(self):
         self.repo = os.environ["GITHUB_REPOSITORY"]
@@ -252,7 +107,7 @@ def authenticate(vpn, challenge, original, headers, student, password):
             request_headers = dict(public.headers) if direct else dict(headers)
             request_headers.update({"Cache-Control": "no-cache", "Pragma": "no-cache"})
             response = transport.post(endpoint("getAuthQr"),
-                params={"_": time.time_ns()}, json={"entityId": original["entityId"], "lck": original["lck"]},
+                params={"_": time.time_ns()}, json={"entityId": original["entityId"]},
                 headers=request_headers, timeout=30)
             response.raise_for_status()
             qr = response.json()
@@ -264,10 +119,8 @@ def authenticate(vpn, challenge, original, headers, student, password):
                 raise PermissionError("学校未返回有效的扫码会话")
             poll = {k: original[k] for k in ("entityId", "requestType", "lck")}
             poll.update(authModuleCode="qr", authChainCode=challenge["authChainCode"],
-                        authPara={"qrToken": info["qrToken"]})
-            if "requestNumber" in challenge:
-                poll["requestNumber"] = challenge["requestNumber"]
-                poll["authPara"]["loginName"] = challenge["userName"]
+                        requestNumber=challenge["requestNumber"],
+                        authPara={"loginName": challenge["userName"], "qrToken": info["qrToken"]})
             # The school's UI starts this long request immediately after QR creation.
             # Keep it alive while publishing the encrypted image to GitHub.
             with ThreadPoolExecutor(max_workers=1) as pool:
