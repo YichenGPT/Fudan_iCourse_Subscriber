@@ -7,6 +7,11 @@ on:
         description: "Comma-separated course IDs to process (e.g. 30004,30005)"
         required: true
         type: string
+      lecture_date:
+        description: "Optional lecture date to re-transcribe (YYYY-MM-DD); leave empty for normal run"
+        required: false
+        default: ""
+        type: string
       use_official_transcript:
         description: "Use official iCourse transcripts instead of ASR"
         required: false
@@ -167,6 +172,7 @@ jobs:
           StuId: ${{ secrets.STUID }}
           UISPsw: ${{ secrets.UISPSW }}
           COURSE_IDS: ${{ inputs.course_ids }}
+          RETRANSCRIBE_DATE: ${{ inputs.lecture_date }}
           USE_OFFICIAL_TRANSCRIPT: ${{ inputs.use_official_transcript && '1' || '' }}
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
@@ -179,7 +185,39 @@ jobs:
         run: |
           eval "$(python scripts/provider_env.py)"
           unset SECRETS_CONTEXT
-          python -u main.py
+          python -u - <<'PY'
+          import datetime
+          import os
+          import main
+
+          target = os.environ.get("RETRANSCRIBE_DATE", "").strip()
+          if target:
+              datetime.date.fromisoformat(target)
+              courses = main.config.COURSE_IDS
+              if len(courses) != 1:
+                  raise ValueError("A targeted re-transcription requires exactly one course ID")
+              db = main.Database()
+              with db.conn:
+                  rows = db.conn.execute(
+                      "SELECT sub_id, sub_title FROM lectures WHERE course_id = ? AND substr(sub_title, 1, 10) = ?",
+                      (courses[0], target),
+                  ).fetchall()
+                  for row in rows:
+                      db.conn.execute(
+                          "UPDATE lectures SET transcript = NULL, summary = NULL, processed_at = NULL, emailed_at = NULL, error_stage = NULL, error_msg = NULL, error_count = 0 WHERE sub_id = ?",
+                          (row["sub_id"],),
+                      )
+                      print(f"[Re-transcribe] Reset {row['sub_id']}: {row['sub_title']}", flush=True)
+              original = main._enumerate_lectures
+              def selected(*args, **kwargs):
+                  return [
+                      item for item in original(*args, **kwargs)
+                      if item[2].get("sub_title", "").startswith(target)
+                  ]
+              main._enumerate_lectures = selected
+              main.config.SMTP_EMAIL = ""
+          main.run()
+          PY
 
       - name: Deploy database to data branch
         if: always()
