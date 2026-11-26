@@ -12,6 +12,11 @@ on:
         required: false
         default: ""
         type: string
+      regenerate_summary_only:
+        description: "Regenerate summary from saved transcript without school login"
+        required: false
+        default: false
+        type: boolean
       use_official_transcript:
         description: "Use official iCourse transcripts instead of ASR"
         required: false
@@ -173,6 +178,7 @@ jobs:
           UISPsw: ${{ secrets.UISPSW }}
           COURSE_IDS: ${{ inputs.course_ids }}
           RETRANSCRIBE_DATE: ${{ inputs.lecture_date }}
+          SUMMARY_ONLY: ${{ inputs.regenerate_summary_only && '1' || '' }}
           USE_OFFICIAL_TRANSCRIPT: ${{ inputs.use_official_transcript && '1' || '' }}
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
@@ -197,6 +203,24 @@ jobs:
               if len(courses) != 1:
                   raise ValueError("A targeted re-transcription requires exactly one course ID")
               db = main.Database()
+              if os.environ.get("SUMMARY_ONLY") == "1":
+                  from src.ai import bucketer
+                  rows = db.conn.execute("SELECT sub_id, transcript FROM lectures WHERE course_id=? AND substr(sub_title,1,10)=?", (courses[0], target)).fetchall()
+                  if not rows:
+                      raise RuntimeError("No matching saved lecture")
+                  summarizer = main.Summarizer()
+                  summarizer.providers.sort(key=lambda p: p["name"] != "gemini")
+                  title = db.conn.execute("SELECT title FROM courses WHERE course_id=?", (courses[0],)).fetchone()[0]
+                  for row in rows:
+                      if not row["transcript"]:
+                          raise RuntimeError("No saved transcript")
+                      prompt, mode = bucketer.assemble(row["transcript"], None, db.get_done_ppt_pages(row["sub_id"]))
+                      summary, model = summarizer.summarize(title, prompt)
+                      db.update_summary(row["sub_id"], summary, model)
+                      db.mark_processed(row["sub_id"])
+                      db.clear_error(row["sub_id"])
+                      print(f"[Summary recovered] {row['sub_id']}: {len(summary)} chars ({model})", flush=True)
+                  raise SystemExit(0)
               with db.conn:
                   rows = db.conn.execute(
                       "SELECT sub_id, sub_title FROM lectures WHERE course_id = ? AND substr(sub_title, 1, 10) = ?",
